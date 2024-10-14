@@ -14,7 +14,7 @@ class Strategy:
         self.volatility = volatility  # Assumed constant volatility for the underlying
 
         # Load options data
-        self.options: pd.DataFrame = pd.read_csv(r"data/cleaned_options_data.csv")
+        self.options: pd.DataFrame = pd.read_csv(r"data/cleaned_options_data.zip")
         self.options["day"] = pd.to_datetime(self.options["ts_recv"]).dt.date
         self.options["hour"] = pd.to_datetime(self.options["ts_recv"]).dt.hour  # Adding hour to filter by day and hour
 
@@ -141,12 +141,15 @@ class Strategy:
 
         # Loop through each unique day and hour
         for date, hour in underlying_prices[["date", "hour"]].drop_duplicates().values:
+#             print(f"Processing date: {date}, hour: {hour}")
 
             # Filter options for the current date and hour
             available_options = self.options[
                 (self.options["day"] == date.date()) & 
                 (self.options["hour"] == hour)
             ]
+#             print("Available options:")
+#             print(available_options)
 
             if available_options.empty:
                 print("No available options for the current date and hour")

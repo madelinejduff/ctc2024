@@ -15,7 +15,7 @@ class Backtester:
 
         self.user_strategy = strategy
 
-        self.options : pd.DataFrame = pd.read_csv("data/cleaned_options_data.csv")
+        self.options : pd.DataFrame = pd.read_csv("data/cleaned_options_data.zip")
         self.options["day"] = self.options["ts_recv"].apply(lambda x: x.split("T")[0])
         self.options["hour"] = self.options["ts_recv"].apply(lambda x: int(x.split("T")[1].split(".")[0].split(":")[0]))
 
