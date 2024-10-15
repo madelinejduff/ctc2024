@@ -117,22 +117,27 @@ class Backtester:
                         raise ValueError(f"Order size exceeds available size; order size: {order_size}, ask size: {ask_size}, buy size: {buy_size}; action: {row['action']}")
 
                     # Handle buy logic
+                   # Handle buy logic
                     if row["action"] == "B":
-                        options_cost: float = order_size * ask_price + 0.1 * strike_price
-                        transaction_cost: float = 0.5 * order_size
+                        options_cost: float = order_size * ask_price  # Option cost without strike price
+                        margin: float = (ask_price + 0.1 * strike_price) * order_size  # Include margin with strike price
+                        transaction_cost: float = 0.5 * order_size  # Fixed transaction cost
                         slippage_cost: float = options_cost * 0.001  # 0.1% slippage
 
                         print(f"Buying {order_size} of {row['option_symbol']} at {ask_price}")
-                        print(f"Transaction cost: {transaction_cost}, Slippage cost: {slippage_cost}")
+                        print(f"Options cost: {options_cost}, Margin: {margin}, Transaction cost: {transaction_cost}, Slippage cost: {slippage_cost}")
 
-                        if self.capital >= options_cost + transaction_cost + slippage_cost:
-                            self.capital -= options_cost + transaction_cost + slippage_cost
-                            self.portfolio_value += order_size * ask_price
+                        # Check if capital is enough for the options cost, margin, transaction cost, and slippage
+                        if self.capital >= options_cost + margin + transaction_cost + slippage_cost:
+                            self.capital -= (options_cost + transaction_cost + slippage_cost)  # Deduct costs
+                            self.portfolio_value += order_size * ask_price  # Update portfolio with the option value
                             print(f"Capital after buying: {self.capital}, Portfolio value: {self.portfolio_value}")
+
+                            # Add the order to open orders if it's not already open
                             if not self.check_option_is_open(row):
                                 self.open_orders.loc[len(self.open_orders)] = row
                         else:
-                            print(f"Not enough capital for trade: Required: {options_cost + transaction_cost + slippage_cost}, Available: {self.capital}")
+                            print(f"Not enough capital for trade: Required: {options_cost + margin + transaction_cost + slippage_cost}, Available: {self.capital}")
 
                     # Handle sell logic
                     else:

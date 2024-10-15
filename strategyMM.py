@@ -37,13 +37,14 @@ class Strategy:
         self.underlying["hour"] = self.underlying["date"].dt.hour
 
         # Calculate the 12-hour moving average
-        self.underlying['moving_average'] = self.underlying['open'].rolling(window=12).mean()
+        self.underlying['moving_average'] = self.underlying['open'].rolling(window=24).mean()
         
     def generate_orders(self) -> pd.DataFrame:
         """
         Generate market-neutral orders based on the 12-hour moving average.
         Buy or sell both calls and puts within a range of strike prices around the ATM.
         Limit to 3 orders per hour, selected from the last 20 minutes.
+        Only trade options with more than 7 days until expiration, and do not trade on or the day before expiration.
         """
         orders = []
         num_atm_options = 3  # Define how many closest ATM options to consider
@@ -65,7 +66,11 @@ class Strategy:
             current_hour = row['hour']
 
             # Get options available for the current day and hour
-            available_options = self.options[(self.options["day"] == current_day) & (self.options["hour"] == current_hour)]
+            available_options = self.options[
+                (self.options["day"] == current_day) &
+                (self.options["hour"] == current_hour) &
+                (self.options["days_to_exp"] >30)  # Only select options with >7 days until expiration
+            ]
 
             if available_options.empty:
                 continue
@@ -81,8 +86,8 @@ class Strategy:
             available_options_last_20min['strike_diff'] = (available_options_last_20min['strike'] - current_price).abs()
 
             # Sort by strike price difference and select top 3 within last 20 minutes
-            closest_calls = available_options_last_20min[available_options_last_20min['is_call'] == True].sort_values(by='strike_diff').head(num_atm_options)
-            closest_puts  = available_options_last_20min[available_options_last_20min['is_call'] == False].sort_values(by='strike_diff').head(num_atm_options)
+            closest_calls = available_options_last_20min[available_options_last_20min['is_call']].sort_values(by='strike_diff').head(num_atm_options)
+            closest_puts = available_options_last_20min[~available_options_last_20min['is_call']].sort_values(by='strike_diff').head(num_atm_options)
 
             if closest_calls.empty or closest_puts.empty:
                 continue
@@ -96,6 +101,9 @@ class Strategy:
                     if pd.Timestamp(call_option['expiration']) <= current_date + timedelta(days=1):
                         print(f"Cannot trade option {call_option['symbol']} on expiration day or later.")
                         continue
+                    if pd.Timestamp(put_option['expiration']) <= current_date + timedelta(days=1):
+                        print(f"Cannot trade put option {put_option['symbol']} on expiration day or later.")
+                        continue
 
                     # Calculate margin for both calls and puts
                     call_margin_required = (float(call_option['ask_px_00']) + 0.1 * current_price) * 100
@@ -106,8 +114,10 @@ class Strategy:
                     put_slippage = put_margin_required * self.slippage
 
                     # Add transaction costs (per contract)
-                    total_call_cost = call_margin_required + call_slippage + self.transaction_cost * min(int(call_option['ask_sz_00']), 5)
-                    total_put_cost = put_margin_required + put_slippage + self.transaction_cost * min(int(put_option['ask_sz_00']), 5)
+                   # Add transaction costs (constant per contract, 0.50)
+                    total_call_cost = call_margin_required + call_slippage + self.transaction_cost
+                    total_put_cost = put_margin_required + put_slippage + self.transaction_cost
+
 
                     print(f"Call margin required: {call_margin_required}, Put margin required: {put_margin_required}")
                     print(f"Transaction cost: {self.transaction_cost}, Slippage: {call_slippage} for calls")
@@ -162,7 +172,7 @@ class Strategy:
                                     'datetime': put_option['ts_clean'],
                                     'option_symbol': put_option['symbol'],
                                     'action': 'S',  # Sell put
-                                    'order_size': max(1, int(min(int(put_option['bid_sz_00']), 5) * 0.1))
+                                    'order_size': max(1, int(min(int(put_option['bid_sz_00']), 5) * 0.3))
                                 })
                                 self.capital += total_put_cost
                                 short_position_size += 1
