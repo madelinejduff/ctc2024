@@ -37,26 +37,26 @@ class Strategy:
         self.underlying["hour"] = self.underlying["date"].dt.hour
 
         # Calculate the 12-hour moving average
-        self.underlying['moving_average'] = self.underlying['open'].rolling(window=24).mean()
+        self.underlying['moving_average'] = self.underlying['open'].rolling(window=48).mean()
         
     def generate_orders(self) -> pd.DataFrame:
         """
-        Generate market-neutral orders based on the 12-hour moving average.
+        Generate market-neutral orders based on the 34-hour moving average.
         Buy or sell both calls and puts within a range of strike prices around the ATM.
-        Limit to 3 orders per hour, selected from the last 20 minutes.
-        Only trade options with more than 7 days until expiration, and do not trade on or the day before expiration.
+        Limit to 3 orders per hour, selected from the last hour.
+        Only trade options with less than 5 days until expiration, and do not trade on or the day before expiration.
         """
         orders = []
         num_atm_options = 3  # Define how many closest ATM options to consider
 
-        # Get the minimum date and skip trading in the first 15 days
+        # Get the minimum date and skip trading in the first 2 days
         min_date = self.underlying["day"].min()
-        skip_days_threshold = pd.Timestamp(min_date) + pd.Timedelta(days=15)
+        skip_days_threshold = pd.Timestamp(min_date) + pd.Timedelta(days=1)
 
         for idx, row in self.underlying.iterrows():
             current_date = pd.Timestamp(row["day"])
 
-            # Skip the first 15 days based on the date
+            # Skip the first 2 days based on the date
             if current_date < skip_days_threshold:
                 continue
 
@@ -69,25 +69,21 @@ class Strategy:
             available_options = self.options[
                 (self.options["day"] == current_day) &
                 (self.options["hour"] == current_hour) &
-                (self.options["days_to_exp"] >30)  # Only select options with >7 days until expiration
+                (self.options["days_to_exp"] < 5)  # Only select options with less than 5 days until expiration
             ]
 
             if available_options.empty:
                 continue
 
-            # Filter for the last 20 minutes of each hour
-            available_options_last_20min = available_options[available_options['ts_clean'].dt.minute >= 40]
-
-            if available_options_last_20min.empty:
-                continue
+            # We are no longer filtering for the last 20 minutes; instead, we take the entire last hour.
+            available_options_last_hour = available_options.copy()
 
             # Add a new column to store the difference between the strike and current price
-            available_options_last_20min = available_options_last_20min.copy()
-            available_options_last_20min['strike_diff'] = (available_options_last_20min['strike'] - current_price).abs()
+            available_options_last_hour['strike_diff'] = (available_options_last_hour['strike'] - current_price).abs()
 
-            # Sort by strike price difference and select top 3 within last 20 minutes
-            closest_calls = available_options_last_20min[available_options_last_20min['is_call']].sort_values(by='strike_diff').head(num_atm_options)
-            closest_puts = available_options_last_20min[~available_options_last_20min['is_call']].sort_values(by='strike_diff').head(num_atm_options)
+            # Sort by strike price difference and select the top 3 calls and top 3 puts
+            closest_calls = available_options_last_hour[available_options_last_hour['is_call']].sort_values(by='strike_diff').head(num_atm_options)
+            closest_puts = available_options_last_hour[~available_options_last_hour['is_call']].sort_values(by='strike_diff').head(num_atm_options)
 
             if closest_calls.empty or closest_puts.empty:
                 continue
@@ -114,72 +110,83 @@ class Strategy:
                     put_slippage = put_margin_required * self.slippage
 
                     # Add transaction costs (per contract)
-                   # Add transaction costs (constant per contract, 0.50)
                     total_call_cost = call_margin_required + call_slippage + self.transaction_cost
                     total_put_cost = put_margin_required + put_slippage + self.transaction_cost
-
 
                     print(f"Call margin required: {call_margin_required}, Put margin required: {put_margin_required}")
                     print(f"Transaction cost: {self.transaction_cost}, Slippage: {call_slippage} for calls")
 
-                    # Check if the margin required is less than 1/10 of the available capital
-                    if total_call_cost <= self.capital / 10 and total_put_cost <= self.capital / 10:
-                        # Handle buy/sell logic based on available capital and moving average comparison
-                        print(self.capital, current_day)
+                    # Function to reduce the size recursively until the margin is within limits
+                    def reduce_size_until_within_margin(option, total_cost, option_type):
+                        size = max(1, int(min(int(option['ask_sz_00']), 5) * 0.1))  # Start with the max allowable size
+                        while total_cost > self.capital / 10 and size > 1:
+                            size = size // 2  # Halve the size until it's within limits
+                            total_cost = (float(option[f'{option_type}_px_00']) + 0.1 * current_price) * 100 * size
+                            total_cost += (total_cost * self.slippage) + self.transaction_cost
+                        return size, total_cost
 
-                        if current_price > ma_price:
-                            # Uptrend: Buy both the call and the put if there is enough margin
-                            if self.capital >= total_call_cost:
-                                orders.append({
-                                    'datetime': call_option['ts_clean'],
-                                    'option_symbol': call_option['symbol'],
-                                    'action': 'B',  # Buy call
-                                    'order_size': max(1, int(min(int(call_option['ask_sz_00']), 5) * 0.1))
-                                })
-                                self.capital -= total_call_cost
-                                long_position_size += 1
-                            else:
-                                print(f"Not enough margin to buy call {call_option['symbol']}, required: {total_call_cost}, available: {self.capital}")
+                    # Handle buy/sell logic based on available capital and moving average comparison
+                    print(self.capital, current_day)
 
-                            if self.capital >= total_put_cost:
-                                orders.append({
-                                    'datetime': put_option['ts_clean'],
-                                    'option_symbol': put_option['symbol'],
-                                    'action': 'B',  # Buy put
-                                    'order_size': max(1, int(min(int(put_option['ask_sz_00']), 5) * 0.1))
-                                })
-                                self.capital -= total_put_cost
-                                long_position_size += 1
-                            else:
-                                print(f"Not enough margin to buy put {put_option['symbol']}, required: {total_put_cost}, available: {self.capital}")
+                    if current_price > ma_price:
+                        # Uptrend: Buy both the call and the put if there is enough margin
+                        size = max(1, int(min(int(call_option['ask_sz_00']), 5) * 0.1))  # Initialize size
 
-                        elif current_price < ma_price:
-                            # Downtrend: Sell both the call and the put if there is enough margin
-                            if self.capital >= total_call_cost:
-                                orders.append({
-                                    'datetime': call_option['ts_clean'],
-                                    'option_symbol': call_option['symbol'],
-                                    'action': 'S',  # Sell call
-                                    'order_size': max(1, int(min(int(call_option['bid_sz_00']), 5) * 0.1))
-                                })
-                                self.capital += total_call_cost
-                                short_position_size += 1
-                            else:
-                                print(f"Not enough margin to sell call {call_option['symbol']}, required: {total_call_cost}, available: {self.capital}")
+                        if total_call_cost > self.capital / 10:
+                            size, total_call_cost = reduce_size_until_within_margin(call_option, total_call_cost, 'ask')
+                        if self.capital >= total_call_cost:
+                            orders.append({
+                                'datetime': call_option['ts_clean'],
+                                'option_symbol': call_option['symbol'],
+                                'action': 'B',  # Buy call
+                                'order_size': size
+                            })
+                            self.capital -= total_call_cost
+                            long_position_size += size
 
-                            if self.capital >= total_put_cost:
-                                orders.append({
-                                    'datetime': put_option['ts_clean'],
-                                    'option_symbol': put_option['symbol'],
-                                    'action': 'S',  # Sell put
-                                    'order_size': max(1, int(min(int(put_option['bid_sz_00']), 5) * 0.3))
-                                })
-                                self.capital += total_put_cost
-                                short_position_size += 1
-                            else:
-                                print(f"Not enough margin to sell put {put_option['symbol']}, required: {total_put_cost}, available: {self.capital}")
-                    else:
-                        print(f"Skipping trade due to margin exceeding 1/10 of available capital.")
+                        size = max(1, int(min(int(put_option['ask_sz_00']), 5) * 0.1))  # Initialize size for put
+
+                        if total_put_cost > self.capital / 10:
+                            size, total_put_cost = reduce_size_until_within_margin(put_option, total_put_cost, 'ask')
+                        if self.capital >= total_put_cost:
+                            orders.append({
+                                'datetime': put_option['ts_clean'],
+                                'option_symbol': put_option['symbol'],
+                                'action': 'B',  # Buy put
+                                'order_size': size
+                            })
+                            self.capital -= total_put_cost
+                            long_position_size += size
+
+                    elif current_price < ma_price:
+                        # Downtrend: Sell both the call and the put if there is enough margin
+                        size = max(1, int(min(int(call_option['bid_sz_00']), 5) * 0.1))  # Initialize size
+
+                        if total_call_cost > self.capital / 10:
+                            size, total_call_cost = reduce_size_until_within_margin(call_option, total_call_cost, 'bid')
+                        if self.capital >= total_call_cost:
+                            orders.append({
+                                'datetime': call_option['ts_clean'],
+                                'option_symbol': call_option['symbol'],
+                                'action': 'S',  # Sell call
+                                'order_size': size
+                            })
+                            self.capital += total_call_cost
+                            short_position_size += size
+
+                        size = max(1, int(min(int(put_option['bid_sz_00']), 5) * 0.1))  # Initialize size for put
+
+                        if total_put_cost > self.capital / 10:
+                            size, total_put_cost = reduce_size_until_within_margin(put_option, total_put_cost, 'bid')
+                        if self.capital >= total_put_cost:
+                            orders.append({
+                                'datetime': put_option['ts_clean'],
+                                'option_symbol': put_option['symbol'],
+                                'action': 'S',  # Sell put
+                                'order_size': size
+                            })
+                            self.capital += total_put_cost
+                            short_position_size += size
 
                 print(f"Total long position size: {long_position_size}, Total short position size: {short_position_size}")
 
