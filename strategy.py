@@ -107,7 +107,7 @@ class Strategy:
             available_options = self.options[
                 (self.options["day"] == current_day) &
                 (self.options["hour"] == current_hour) &
-                (self.options["days_to_exp"] < 7)  # Only select options with less than 7 days until expiration
+                (self.options["days_to_exp"] <10)  # Only select options with less than 7 days until expiration
             ]
 
             if available_options.empty:
