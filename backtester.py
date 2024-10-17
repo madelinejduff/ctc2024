@@ -292,7 +292,8 @@ class Backtester:
     percentage_returns = []
     prev = 100_000_000
     for i in range(len(self.pnl)):
-      percentage_returns.append(self.pnl[i] / prev)
+#       percentage_returns.append(self.pnl[i] / prev)
+      percentage_returns.append(self.pnl[i] / prev - 1)
       prev = self.pnl[i]
 
     avg_return = np.sum(percentage_returns) / 61 # 61 trading days in simulation period
