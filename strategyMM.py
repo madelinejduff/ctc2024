@@ -174,7 +174,7 @@ class Strategy:
         if not orders_df.empty:
             orders_df = orders_df.groupby(orders_df['datetime'].dt.date).apply(lambda x: x.head(20)).reset_index(drop=True)
 
-        orders_df["datetime"] = orders_df["datetime"].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S'))
+        orders_df["datetime"] = orders_df["datetime"].apply(lambda x: x.isoformat())
         print(orders_df)
         
         return orders_df
