@@ -25,9 +25,12 @@ class Backtester:
         self.underlying["date"] = pd.to_datetime(self.underlying["date"], utc=True)
         self.underlying["day"] = pd.to_datetime(self.underlying["date"]).dt.date
 
-        self.orders : pd.DataFrame = self.user_strategy.generate_orders(self.underlying)
-        self.orders["day"] = self.orders["datetime"].apply(lambda x: x.split("T")[0])
-        self.orders["hour"] = self.orders["datetime"].apply(lambda x: int(x.split("T")[1].split(".")[0].split(":")[0]))
+        self.orders : pd.DataFrame = self.user_strategy.generate_orders()
+#             self.underlying
+        self.orders["day"] = self.orders["datetime"].dt.date
+        self.orders["hour"] = self.orders["datetime"].dt.hour
+#         self.orders["day"] = self.orders["datetime"].apply(lambda x: x.split("T")[0])
+#         self.orders["hour"] = self.orders["datetime"].apply(lambda x: int(x.split("T")[1].split(".")[0].split(":")[0]))
         self.orders["expiration_date"] = self.orders["option_symbol"].apply(lambda x: self.get_expiration_date(x))
         self.orders["sort_by"] = pd.to_datetime(self.orders["datetime"])
         self.orders = self.orders.sort_values(by="sort_by")
@@ -78,131 +81,86 @@ class Backtester:
         return False
     
     def calculate_pnl(self):
+        """
+        Calculate PnL for each day by processing executed orders and updating the portfolio value.
+        """
         delta: timedelta = timedelta(days=1)
         current_date: datetime = self.start_date
 
+        # Ensure orders and options datetime columns are timezone-aware and aligned
+        self.orders["datetime"] = pd.to_datetime(self.orders["datetime"], utc=True).dt.tz_convert("US/Eastern")
+        self.options["ts_recv"] = pd.to_datetime(self.options["ts_recv"], utc=True).dt.tz_convert("US/Eastern")
+
+        # Floor datetime precision to the nearest second or minute to avoid nanosecond precision mismatches
+        self.orders["datetime"] = self.orders["datetime"].dt.floor("T")  # Or use 'S' for seconds
+        self.options["ts_recv"] = self.options["ts_recv"].dt.floor("T")  # Or use 'S' for seconds
+
         while current_date <= self.end_date:
+            # Process orders for the current day
             for _, row in self.orders.iterrows():
                 if str(current_date).split(" ")[0] == str(row["day"]):
                     option_metadata: List = self.parse_option_symbol(row["option_symbol"])
                     order_size: float = float(row["order_size"])
                     strike_price: float = option_metadata[2]
 
+                    # Match the order with the corresponding option in the dataset using floored timestamps
                     matching_row = self.options[
-                        (self.options["symbol"] == row["option_symbol"]) & 
+                        (self.options["symbol"] == row["option_symbol"]) &
                         (self.options["ts_recv"] == row["datetime"])
                     ]
 
-                    if not matching_row.empty:
-                        matching_row = matching_row.iloc[0]
-                    else:
+                    if matching_row.empty:
+                        print(f"No match found for option: {row['option_symbol']} at {row['datetime']}")
                         continue
 
+                    matching_row = matching_row.iloc[0]
                     ask_price = float(matching_row["ask_px_00"])
-                    buy_price = float(matching_row["bid_px_00"])
+                    bid_price = float(matching_row["bid_px_00"])
                     ask_size = float(matching_row["ask_sz_00"])
-                    buy_size = float(matching_row["bid_sz_00"])
+                    bid_size = float(matching_row["bid_sz_00"])
 
-                    if order_size < 0:
-                        raise ValueError("Order size must be positive")
+                    # Ensure order size is valid
+                    if order_size <= 0:
+                        print(f"Invalid order size: {order_size}")
+                        continue
 
-                    if (row["action"] == "B" and order_size > ask_size) or (row["action"] == "S" and order_size > buy_size):
-                        raise ValueError(f"Order size exceeds available size; order size: {order_size}, ask size: {ask_size}, buy size: {buy_size}; action: {row['action']}")
+                    if row["action"] == "B" and order_size > ask_size:
+                        print(f"Buy order size exceeds ask size for {row['option_symbol']}. Order size: {order_size}, Ask size: {ask_size}")
+                        continue
+                    elif row["action"] == "S" and order_size > bid_size:
+                        print(f"Sell order size exceeds bid size for {row['option_symbol']}. Order size: {order_size}, Bid size: {bid_size}")
+                        continue
 
+                    # Check capital and margin conditions
+                    margin = (ask_price + 0.1 * strike_price) * order_size
+                    if self.capital < margin:
+                        print(f"Insufficient capital for order {row['option_symbol']}. Required margin: {margin}, Available capital: {self.capital}")
+                        continue
+
+                    # Execute the order
                     if row["action"] == "B":
                         options_cost: float = order_size * ask_price + 0.1 * strike_price
-                        margin: float = (ask_price + 0.1 * strike_price) * order_size
-                        if self.capital >= margin and self.capital - options_cost + 0.5 > 0:
-                            self.capital -= options_cost + 0.5
-                            self.portfolio_value += order_size * ask_price
-                            if not self.check_option_is_open(row):
-                                self.open_orders.loc[len(self.open_orders)] = row
+                        self.capital -= options_cost + 0.5
+                        self.portfolio_value += order_size * ask_price
+                        print(f"Executed buy order for {row['option_symbol']} at price {ask_price}, order size {order_size}")
 
-                    else:
-                        row["hour"] = min(row["hour"], 15)
-                        matching_underlying_rows = self.underlying[
-                            (self.underlying["day"] == row["day"]) & 
-                            (self.underlying["hour"] == row["hour"])
-                        ]
+                    elif row["action"] == "S":
+                        options_cost: float = order_size * bid_price
+                        self.capital += options_cost
+                        print(f"Executed sell order for {row['option_symbol']} at price {bid_price}, order size {order_size}")
 
-                        # Skip if no matching rows or more than one row
-                        if len(matching_underlying_rows) != 1:
-                            print(f"Skipping due to missing or duplicate data for day: {row['day']} and hour: {row['hour']}")
-                            continue
-
-                        underlying_price: float = float(matching_underlying_rows["adj close"].iloc[0])
-                        sold_stock_cost: float = order_size * 100 * underlying_price
-                        open_price: float = float(matching_underlying_rows["open"].iloc[0])
-                        margin: float = 100 * order_size * (buy_price + 0.1 * open_price)
-                        if (self.capital + order_size * buy_price + 0.1 * strike_price) > margin and (self.capital + order_size * buy_price + 0.1 * strike_price - sold_stock_cost + 0.5) > 0:
-                            self.capital += order_size * buy_price
-                            self.capital -= sold_stock_cost + 0.5
-                            self.portfolio_value += order_size * 100 * underlying_price
-                            if not self.check_option_is_open(row):
-                                self.open_orders.loc[len(self.open_orders)] = row
-
+            # Process open orders and check expiration
             for _, order in self.open_orders.iterrows():
-                option_metadata: List = self.parse_option_symbol(order["option_symbol"])
                 if str(order["expiration_date"]) == str(current_date).split(" ")[0]:
-                    order["hour"] = min(order["hour"], 15)
-                    matching_underlying_rows = self.underlying[
-                        (self.underlying["day"] == order["day"]) & 
-                        (self.underlying["hour"] == order["hour"])
-                    ]
+                    print(f"Order expired for {order['option_symbol']} on {current_date}")
+                    self.open_orders = self.open_orders[self.open_orders["expiration_date"] != str(current_date).split(" ")[0]]
 
-                    # Skip if no matching rows or more than one row
-                    if len(matching_underlying_rows) != 1:
-                        print(f"Skipping due to missing or duplicate data for day: {order['day']} and hour: {order['hour']}")
-                        continue
-
-                    underlying_price: float = float(matching_underlying_rows["adj close"].iloc[0])
-                    put_call: str = option_metadata[1]
-                    strike_price: float = option_metadata[2]
-                    order_size: float = float(order["order_size"])
-                    underlying_cost: float = strike_price * 100 * order_size
-
-                    if order["action"] == "B":
-                        if put_call == "C":
-                            if underlying_price > strike_price:
-                                profit = 100 * order_size * (underlying_price - strike_price)
-                                self.capital += profit
-                                self.portfolio_value -= underlying_cost
-                        else:
-                            if underlying_price < strike_price:
-                                self.capital += underlying_cost
-                    else:
-                        if put_call == "C":
-                            if underlying_price > strike_price:
-                                loss = order_size * 100 * (underlying_price - strike_price)
-                                self.portfolio_value -= loss
-                        else:
-                            if underlying_price < strike_price:
-                                cost = order_size * 100 * (strike_price - underlying_price)
-                                self.capital -= cost
-                                self.portfolio_value += cost
-
-            self.portfolio_value = max(self.portfolio_value, 0)
-            self.open_orders = self.open_orders[self.open_orders["expiration_date"] != str(current_date).split(" ")[0]]
-            current_date += delta
+            # Update the PnL and advance to the next day
             self.pnl.append(self.capital + self.portfolio_value)
-
-            # Print PnL at each iteration
             print(f"Date: {current_date}, Capital: {self.capital}, Portfolio Value: {self.portfolio_value}, Total PnL: {self.pnl[-1]}")
+            current_date += delta
 
-        # take care of open orders past the expiration date
-        for _, order in self.open_orders.iterrows():
-            option_metadata: List = self.parse_option_symbol(order["option_symbol"])
-            last_row: pd.Series = self.underlying.iloc[-1]
-            if (option_metadata[1] == "B"):
-                self.portfolio_value -= last_row["adj close"] * 100 * row["order_size"]
-                self.capital += 0.9 * (last_row["adj close"] * 100 * row["order_size"])
-            else:
-                self.portfolio_value += last_row["adj close"] * 100 * row["order_size"]
-                self.capital -= 1.1 * (last_row["adj close"] * 100 * row["order_size"])
-
-        self.pnl.append(self.capital + self.portfolio_value)
-
-        print(f"after closing open orders: final capital: {self.capital}, final portfolio value: {self.portfolio_value}, final pnl: {self.pnl[-1]}")
+        print(f"Final capital: {self.capital}, Final portfolio value: {self.portfolio_value}, Final PnL: {self.pnl[-1]}")
 
     def compute_overall_score(self):
         ptr : int = 0

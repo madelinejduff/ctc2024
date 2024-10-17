@@ -7,7 +7,7 @@ from datetime import datetime
 class Strategy:
 
     def __init__(self, risk_free_rate=0.03, volatility=0.2) -> None:
-        self.capital: float = 1_000_000
+        self.capital: float = 100_000_000
         self.portfolio: float = 0
         self.current_delta: float = 0  # Track current portfolio delta for hedging
         self.risk_free_rate = risk_free_rate  # Annual risk-free interest rate
@@ -27,6 +27,10 @@ class Strategy:
         self.underlying = pd.read_csv(r"data/underlying_data_hour.csv")
         self.underlying.columns = self.underlying.columns.str.lower()  # Standardize column names
         
+        # Calculate the 30-day moving average
+        self.underlying['moving_average'] = self.underlying['open'].rolling(window=30).mean()
+
+
     def black_scholes_delta(self, S, K, T, r, sigma, option_type='C'):
         """
         Calculate Black-Scholes delta for call or put option.

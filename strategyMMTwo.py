@@ -38,10 +38,41 @@ class Strategy:
 
         # Calculate the 12-hour moving average
         self.underlying['moving_average'] = self.underlying['open'].rolling(window=48).mean()
+
+        # Calculate RSI for options data
+        self.options["RSI"] = self.calculate_rsi(self.options, period=14)
         
+    def calculate_rsi(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        Calculate the Relative Strength Index (RSI) for a given stock data.
+        Parameters:
+        - data: DataFrame containing the stock data with 'ask_px_00' as the price.
+        - period: The number of periods to use for the RSI calculation.
+        Returns:
+        - A pandas Series containing the RSI values.
+        """
+        # Ensure the timestamp is in datetime format and sort the data
+        data['ts_recv'] = pd.to_datetime(data['ts_recv'])
+        data = data.sort_values('ts_recv')
+        
+        # Calculate the price changes
+        delta = data['ask_px_00'].diff()
+        
+        # Separate gains and losses
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        
+        # Calculate the Relative Strength (RS)
+        rs = gain / loss
+        rs = rs.fillna(0)  # Handle division by zero
+        
+        # Calculate RSI
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
     def generate_orders(self) -> pd.DataFrame:
         """
-        Generate market-neutral orders based on the 34-hour moving average.
+        Generate market-neutral orders based on the 34-hour moving average and RSI.
         Buy or sell both calls and puts within a range of strike prices around the ATM.
         Limit to 3 orders per hour, selected from the last hour.
         Only trade options with less than 5 days until expiration, and do not trade on or the day before expiration.
@@ -75,6 +106,12 @@ class Strategy:
             if available_options.empty:
                 continue
 
+            # Filter based on RSI (only consider options where RSI is above 70 or below 30)
+            available_options = available_options[(available_options['RSI'] > 70) | (available_options['RSI'] < 30)]
+
+            if available_options.empty:
+                continue
+
             # We are no longer filtering for the last 20 minutes; instead, we take the entire last hour.
             available_options_last_hour = available_options.copy()
 
@@ -89,7 +126,7 @@ class Strategy:
             if closest_calls.empty or closest_puts.empty:
                 continue
 
-            # Generate orders based on the comparison of current price to moving average
+            # Generate orders based on the comparison of current price, moving average, and RSI
             long_position_size, short_position_size = 0, 0
 
             for _, call_option in closest_calls.iterrows():
@@ -122,8 +159,8 @@ class Strategy:
                     total_call_cost = call_margin_required + call_slippage + self.transaction_cost
                     total_put_cost = put_margin_required + put_slippage + self.transaction_cost
 
-                    # Handle buy/sell logic based on available capital and moving average comparison
-                    if current_price > ma_price:
+                    # Handle buy/sell logic based on available capital, moving average, and RSI comparison
+                    if current_price > ma_price and available_options['RSI'].mean() < 30:  # RSI indicates oversold
                         # Uptrend: Buy both the call and the put if there is enough margin
                         if self.capital >= total_call_cost:
                             orders.append({
@@ -145,7 +182,7 @@ class Strategy:
                             self.capital -= total_put_cost
                             long_position_size += 1
 
-                    elif current_price < ma_price:
+                    elif current_price < ma_price and available_options['RSI'].mean() > 70:  # RSI indicates overbought
                         # Downtrend: Sell both the call and the put if there is enough margin
                         if self.capital >= total_call_cost:
                             orders.append({
@@ -175,6 +212,8 @@ class Strategy:
             orders_df = orders_df.groupby(orders_df['datetime'].dt.date).apply(lambda x: x.head(20)).reset_index(drop=True)
 
         orders_df["datetime"] = orders_df["datetime"].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S'))
+
+            
         print(orders_df)
         
         return orders_df

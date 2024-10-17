@@ -39,5 +39,5 @@ class Strategy:
         "order_size" : order_size
       }
       orders.append(order)
-    
+    print(pd.DataFrame(orders))
     return pd.DataFrame(orders)
